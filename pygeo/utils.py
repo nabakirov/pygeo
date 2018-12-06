@@ -1,4 +1,7 @@
 import math
+from logging import getLogger
+
+logger = getLogger('pygeo utils')
 
 
 EARTH_RADIUS_M = 6371008  # meters
@@ -40,12 +43,16 @@ def interpolate(point1, point2, segment_length=10):
 
     x1, y1 = point1
     x2, y2 = point2
+    new_points = [point1]
     _distance = distance(point1, point2)
+    logger.debug('interpolated distance {}'.format(_distance))
+
     if _distance <= segment_length:
-        return
+        new_points.append(point2)
+        return new_points
     segment_quantity = int(_distance / segment_length) + 1  # step = slices + 1
 
-    new_points = [point1]
+
 
     if abs(x1 - x2) <= abs(y1 - y2):
         y_len = abs(y2 - y1)

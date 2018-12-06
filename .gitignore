@@ -1,2 +1,6 @@
 .env
 .idea
+.vscode
+*.rdb
+
+*__pycache__*
