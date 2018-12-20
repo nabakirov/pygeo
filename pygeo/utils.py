@@ -70,7 +70,7 @@ def interpolate(point1, point2, segment_length=10):
         x_len = abs(x2 - x1)
         if x_len == 0:
             return
-        step = x_len / (segment_quantity + 1)
+        step = x_len / segment_quantity
         delta = (y2 - y1) / (x2 - x1)
         step *= sign(x2 - x1)
         x = x1

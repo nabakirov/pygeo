@@ -51,6 +51,10 @@ class Point(BasePoint):
     original_y = None
     timestamp = None
     by_direction = None  # -1, 1 acceptable values
+    adjustment_lat = None
+    adjustment_lng = None
+    adjustment_x = None
+    adjustment_y = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -84,32 +88,59 @@ class Point(BasePoint):
         self.lng = base_point.lng
         self.on_direction_position = base_point.on_direction_position
 
+    def set_adjustment_data(self, point):
+        self.adjustment_lat = point.lat
+        self.adjustment_lng = point.lng
+        self.adjustment_x = point.x
+        self.adjustment_y = point.y
 
 
 class Notification(BasePoint):
     id = None
-    entry = None
-    leave_interval = None
-    entry_trigger = None
-    leave_trigger = None
+    entry = None                # digit | entry distance in meters
+    leave_interval = None       # tuple of digits | leave distances in meters
+    entry_trigger = None        # callable
+    leave_trigger = None        # callable
+    silent_limit = 60 * 30      # in sec | after notification will be silent given seconds
+    last_enter_notified = None  # timestamp
+    last_leave_notified = None  # timestamp
 
     def __init__(self, id, lat, lng, entry=None, leave_interval=None, enter_trigger=None, leave_trigger=None):
         super().__init__(lat, lng)
         self.id = id
 
         # todo: make validation on entry and leave -> must be positive
-
+        assert entry > 0
         self.entry = entry
         # todo: make validation on leave interval -> must be (1, 2)
+        assert len(leave_interval) == 2
+        for i in leave_interval:
+            assert i > 0
         self.leave_interval = leave_interval
         self.entry_trigger = enter_trigger
         self.leave_trigger = leave_trigger
 
-    def notify_entry(self):
+    def __notify_entry(self, point):
         self.entry_trigger(self.id)
+        self.last_enter_notified = point.timestamp
 
-    def notify_leave(self):
-        self.leave_trigger(self.id)
+    def __notify_leave(self, point, next_point):
+        self.leave_trigger(self.id, next_point.id if next_point else next_point)
+        self.last_leave_notified = point.timestamp
+
+    def notify_entry(self, point):
+        if self.last_enter_notified:
+            if abs(point.timestamp - self.last_enter_notified) > self.silent_limit:
+                self.__notify_entry(point)
+        else:
+            self.__notify_entry(point)
+
+    def notify_leave(self, point, next_point):
+        if self.last_leave_notified:
+            if abs(point.timestamp - self.last_leave_notified) > self.silent_limit:
+                self.__notify_leave(point, next_point)
+        else:
+            self.__notify_leave(point, next_point)
 
 
 class Direction:
@@ -166,7 +197,7 @@ class Direction:
     def from_latlng(self, coordinates):
         self.__init_coordinates(coordinates)
 
-    def project(self, xy, raise_exception=True):
+    def project(self, xy):
         # todo: find nearest point
         min_point = None
         min_distance = None
@@ -183,26 +214,60 @@ class Direction:
 
     def notify(self, point):
         # todo: make binary search
-        for notification in self.notifications:
+        for i, notification in enumerate(self.notifications):
             a = notification.on_direction_position - notification.entry
             b = notification.on_direction_position + notification.leave_interval[0]
             c = notification.on_direction_position + notification.leave_interval[1]
             if a <= point.on_direction_position <= notification.on_direction_position:
-                notification.notify_entry()
+                notification.notify_entry(point)
             elif b <= point.on_direction_position <= c:
-                notification.notify_leave()
+                next_notification = self.__find_next_notification_point(point)
+                notification.notify_leave(point, next_notification)
+
+            # finding between notifications
+            if i == 0:
+                continue
+            if self.notifications[i - 1].on_direction_position <= \
+                    point.on_direction_position <= \
+                    self.notifications[i].on_direction_position:
+                return self.notifications[i - 1], self.notifications[i]
+        return None, None
+
+    def __find_next_notification_point(self, point):
+        # todo: make binary search
+        for n in self.notifications:
+            if n.on_direction_position > point.on_direction_position:
+                return n
+        return None
+
+    def point_by_position(self, meters):
+        for point in self.points:
+            if point.on_direction_position >= meters:
+                return point
+        return None
 
 
 class Geo:
     directions = []
     current_direction = None
-    buffer_limit = 10
-    time_limit = 60 * 5
-    distance_limit = 200
-    out_of_route_distance_limit = 200
+    buffer_limit = None
+    pings_time_limit = None
+    pings_distance_limit = None
+    out_of_route_distance_limit = None
+    is_adjustment_active = False
 
-    buffer = deque(maxlen=buffer_limit)
-    clean_buffer = deque(maxlen=buffer_limit)
+    buffer = None
+    clean_buffer = None
+
+    def __init__(self, buffer_limit=10, pings_time_limit=60 * 5, pings_distance_limit=300,
+                 out_of_route_distance_limit=300, is_adjustment_active=False):
+        self.buffer_limit = buffer_limit
+        self.pings_time_limit = pings_time_limit
+        self.pings_distance_limit = pings_distance_limit
+        self.out_of_route_distance_limit = out_of_route_distance_limit
+        self.is_adjustment_active = is_adjustment_active
+        self.buffer = deque(maxlen=buffer_limit)
+        self.clean_buffer = deque(maxlen=buffer_limit)
 
     def add_direction(self, direction):
         assert type(direction) == Direction
@@ -214,9 +279,18 @@ class Geo:
     def ping(self, lat, lng):
         self.__pretty_point(lat, lng)
         self.__point_on_direction()
-        self.current_direction.notify(self.buffer[0])
+        prev_point, next_point = self.current_direction.notify(self.buffer[0])
+        if self.is_adjustment_active:
+            self.__make_adjustment(self.buffer[0], prev_point, next_point)
         logger.debug('ok')
         return self.buffer[0]
+
+    def __make_adjustment(self, point, prev_point, next_point):
+        if not prev_point or not next_point:
+            return
+        position = (prev_point.on_direction_position + next_point.on_direction_position) / 2
+        adj_point = self.current_direction.point_by_position(position)
+        point.set_adjustment_data(adj_point)
 
     def __point_on_direction(self):
         if not self.current_direction:
@@ -235,7 +309,7 @@ class Geo:
         return point, distance
 
     # defines if point is going forward for given direction
-    def __going_by_direction(self, points=None, direction=None, raise_exception=True, clean=True):
+    def __going_by_direction(self, points=None, direction=None):
         if not points:
             points = self.buffer[1], self.buffer[0]
         prev_point, current_point = points
@@ -243,15 +317,14 @@ class Geo:
             direction = self.current_direction
         if not prev_point.by_direction.get(direction.id):
             prev_point, distance = self.__project_on_direction(prev_point, direction)
-
+        delta = None
         if not current_point.by_direction.get(direction.id):
             current_point, distance = self.__project_on_direction(current_point, direction)
-            if distance > self.out_of_route_distance_limit and raise_exception:
-                logger.debug('out of route')
-                if clean:
-                    self.__clean()
-                raise exceptions.OutOfRouteException()
-        delta = current_point.on_direction_position - prev_point.on_direction_position
+            if distance > self.out_of_route_distance_limit:
+                delta = 0
+                self.clean_buffer.append(current_point)
+
+        delta = current_point.on_direction_position - prev_point.on_direction_position if delta is None else delta
         if delta > 0:
             forward_direction = 1  # going forward by direction
             self.clean_buffer.append(current_point)
@@ -281,18 +354,14 @@ class Geo:
             if not first_point.by_direction.get(direction.id):
                 first_point.by_direction[direction.id] = 0
 
-            try:
-                # buffer deque is backward, index = 0 is latest
-                for i in range(self.buffer_limit - 2, -1, -1):
 
-                    self.__going_by_direction(points=(self.buffer[i+1],
-                                                      self.buffer[i]),
-                                              direction=direction,
-                                              raise_exception=True,
-                                              clean=False)
+            # buffer deque is backward, index = 0 is latest
+            for i in range(self.buffer_limit - 2, -1, -1):
 
-            except exceptions.OutOfRouteException:
-                continue
+                self.__going_by_direction(points=(self.buffer[i+1],
+                                                  self.buffer[i]),
+                                          direction=direction)
+
             if self.__am_i_going_forward(points=self.buffer,
                                          direction=direction):
                 return direction
@@ -315,15 +384,15 @@ class Geo:
                 logger.debug("same coordinates")
                 raise exceptions.SameCoordinateException()
 
-            if abs(point.timestamp - self.buffer[0].timestamp) >= self.time_limit:
+            if abs(point.timestamp - self.buffer[0].timestamp) >= self.pings_time_limit:
                 logger.debug('time limit reached')
                 self.__clean()
                 raise exceptions.TimeLimitExitedException()
-            distance = utils.distance(point.original_xy, self.buffer[0].original_xy)
-            if distance > self.distance_limit:
-                logger.debug('distance limit reached')
-                self.__clean()
-                raise exceptions.DistanceLimitExited(str(distance))
+            # distance = utils.distance(point.original_xy, self.buffer[0].original_xy)
+            # if distance > self.pings_distance_limit:
+            #     logger.debug('distance limit reached')
+            #     self.__clean()
+            #     raise exceptions.DistanceLimitExited(str(distance))
 
             self.buffer.appendleft(point)
             if len(self.buffer) < self.buffer_limit:
