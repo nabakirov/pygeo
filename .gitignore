@@ -1,6 +1,10 @@
 .env
+.env34
 .idea
 .vscode
 *.rdb
-
+.python-version
 *__pycache__*
+
+tmp/*
+.DS_STORE

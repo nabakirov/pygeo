@@ -50,7 +50,7 @@ class Point(BasePoint):
     original_x = None
     original_y = None
     timestamp = None
-    by_direction = None  # -1, 1 acceptable values
+    by_direction = None
     adjustment_lat = None
     adjustment_lng = None
     adjustment_x = None
@@ -327,13 +327,12 @@ class Geo:
         delta = current_point.on_direction_position - prev_point.on_direction_position if delta is None else delta
         if delta > 0:
             forward_direction = 1  # going forward by direction
-            self.clean_buffer.append(current_point)
         elif delta < 0:
             forward_direction = -1  # going backward by direction
-            self.clean_buffer.append(current_point)
         else:
             forward_direction = 0  # not moving
 
+        self.clean_buffer.append(current_point)
         current_point.by_direction[direction.id] = forward_direction
         return forward_direction
 
