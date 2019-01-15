@@ -105,7 +105,7 @@ class Notification(BasePoint):
     last_enter_notified = None  # timestamp
     last_leave_notified = None  # timestamp
 
-    def __init__(self, id, lat, lng, entry=None, leave_interval=None, enter_trigger=None, leave_trigger=None):
+    def __init__(self, id, lat, lng, entry=None, leave_interval=None, entry_trigger=None, leave_trigger=None):
         super().__init__(lat, lng)
         self.id = id
 
@@ -117,30 +117,30 @@ class Notification(BasePoint):
         for i in leave_interval:
             assert i > 0
         self.leave_interval = leave_interval
-        self.entry_trigger = enter_trigger
+        self.entry_trigger = entry_trigger
         self.leave_trigger = leave_trigger
 
-    def __notify_entry(self, point):
-        self.entry_trigger(self.id)
+    def __notify_entry(self, layer, point, current, prev, direction):
+        self.entry_trigger(layer, current, prev, direction)
         self.last_enter_notified = point.timestamp
 
-    def __notify_leave(self, point, next_point):
-        self.leave_trigger(self.id, next_point.id if next_point else next_point)
+    def __notify_leave(self, layer, point, current, next, direction):
+        self.leave_trigger(layer, current, next, direction)
         self.last_leave_notified = point.timestamp
 
-    def notify_entry(self, point):
+    def notify_entry(self, layer, point, prev, direction):
         if self.last_enter_notified:
             if abs(point.timestamp - self.last_enter_notified) > self.silent_limit:
-                self.__notify_entry(point)
+                self.__notify_entry(layer, point, self, prev, direction)
         else:
-            self.__notify_entry(point)
+            self.__notify_entry(layer, point, self, prev, direction)
 
-    def notify_leave(self, point, next_point):
+    def notify_leave(self, layer, point, next, direction):
         if self.last_leave_notified:
             if abs(point.timestamp - self.last_leave_notified) > self.silent_limit:
-                self.__notify_leave(point, next_point)
+                self.__notify_leave(layer, point, self, next, direction)
         else:
-            self.__notify_leave(point, next_point)
+            self.__notify_leave(layer, point, self, next, direction)
 
 
 class Direction:
@@ -155,16 +155,18 @@ class Direction:
         self.segment_length = segment_length
         self.notification_distance_limit = notification_distance_limit
         self.points = []
-        self.notifications = []
+        self.notifications = {}
 
-    def add_notification(self, id, lat, lng, enter=None, leave=None, enter_trigger=None, leave_trigger=None):
-        notification = Notification(id, lat, lng, enter, leave, enter_trigger, leave_trigger)
+    def add_notification(self, id, lat, lng, layer, entry_distance=None, leave_interval=None, entry_trigger=None, leave_trigger=None):
+        notification = Notification(id, lat, lng, entry_distance, leave_interval, entry_trigger, leave_trigger)
         point, distance = self.project(notification.xy)
         if distance > self.notification_distance_limit:
             raise exceptions.NotificationDistanceLimitExitedException("notification point must be close to direction")
         notification.on_direction_position = point.on_direction_position
-        self.notifications.append(notification)
-        self.notifications = sorted(self.notifications, key=lambda x: x.on_direction_position)
+        if layer not in self.notifications:
+            self.notifications[layer] = []
+        self.notifications[layer].append(notification)
+        self.notifications[layer] = sorted(self.notifications[layer], key=lambda x: x.on_direction_position)
 
     def __init_coordinates(self, coordinates):
         logger.debug('init direction coordinates {}'.format(len(coordinates)))
@@ -212,33 +214,44 @@ class Direction:
 
         return min_point, min_distance
 
-    def notify(self, point):
-        # todo: make binary search
-        for i, notification in enumerate(self.notifications):
-            a = notification.on_direction_position - notification.entry
-            b = notification.on_direction_position + notification.leave_interval[0]
-            c = notification.on_direction_position + notification.leave_interval[1]
-            if a <= point.on_direction_position <= notification.on_direction_position:
-                notification.notify_entry(point)
-            elif b <= point.on_direction_position <= c:
-                next_notification = self.__find_next_notification_point(point)
-                notification.notify_leave(point, next_notification)
-
-            # finding between notifications
-            if i == 0:
-                continue
-            if self.notifications[i - 1].on_direction_position <= \
+    def find_between(self, point, layer):
+        for i in range(1, len(self.notifications[layer])):
+            if self.notifications[layer][i - 1].on_direction_position <= \
                     point.on_direction_position <= \
-                    self.notifications[i].on_direction_position:
-                return self.notifications[i - 1], self.notifications[i]
+                    self.notifications[layer][i].on_direction_position:
+                return self.notifications[layer][i - 1], self.notifications[layer][i]
         return None, None
 
-    def __find_next_notification_point(self, point):
+    def notify(self, point):
         # todo: make binary search
-        for n in self.notifications:
-            if n.on_direction_position > point.on_direction_position:
-                return n
-        return None
+        layers_between = {}
+        for layer, notifications in self.notifications.items():
+            for i, notification in enumerate(notifications):
+                a = notification.on_direction_position - notification.entry
+                b = notification.on_direction_position + notification.leave_interval[0]
+                c = notification.on_direction_position + notification.leave_interval[1]
+                if a <= point.on_direction_position <= notification.on_direction_position:
+                    if i != 0:
+                        try:
+                            prev_notification = self.notifications[layer][i - 1]
+                        except IndexError:
+                            prev_notification = None
+                    else:
+                        prev_notification = None
+                    notification.notify_entry(layer, point, prev_notification, direction=self)
+                    layers_between[layer] = (prev_notification, point)
+                    break
+                elif b <= point.on_direction_position <= c:
+                    try:
+                        next_notification = self.notifications[layer][i + 1]
+                    except IndexError:
+                        next_notification = None
+                    notification.notify_leave(layer, point, next_notification, direction=self)
+                    layers_between[layer] = (point, next_notification)
+                    break
+            if layer not in layers_between:
+                layers_between[layer] = self.find_between(point, layer)
+        return layers_between
 
     def point_by_position(self, meters):
         for point in self.points:
@@ -254,18 +267,18 @@ class Geo:
     pings_time_limit = None
     pings_distance_limit = None
     out_of_route_distance_limit = None
-    is_adjustment_active = False
+    adjustment_layer = None
 
     buffer = None
     clean_buffer = None
 
     def __init__(self, buffer_limit=10, pings_time_limit=60 * 5, pings_distance_limit=300,
-                 out_of_route_distance_limit=300, is_adjustment_active=False):
+                 out_of_route_distance_limit=300, adjustment_layer=None):
         self.buffer_limit = buffer_limit
         self.pings_time_limit = pings_time_limit
         self.pings_distance_limit = pings_distance_limit
         self.out_of_route_distance_limit = out_of_route_distance_limit
-        self.is_adjustment_active = is_adjustment_active
+        self.adjustment_layer = adjustment_layer
         self.buffer = deque(maxlen=buffer_limit)
         self.clean_buffer = deque(maxlen=buffer_limit)
 
@@ -279,9 +292,10 @@ class Geo:
     def ping(self, lat, lng):
         self.__pretty_point(lat, lng)
         self.__point_on_direction()
-        prev_point, next_point = self.current_direction.notify(self.buffer[0])
-        if self.is_adjustment_active:
-            self.__make_adjustment(self.buffer[0], prev_point, next_point)
+        between = self.current_direction.notify(self.buffer[0])
+        print(between)
+        if self.adjustment_layer:
+            self.__make_adjustment(self.buffer[0], *between[self.adjustment_layer])
         logger.debug('ok')
         return self.buffer[0]
 
