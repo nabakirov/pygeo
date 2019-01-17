@@ -271,6 +271,7 @@ class Geo:
 
     buffer = None
     clean_buffer = None
+    vector = None
 
     def __init__(self, buffer_limit=10, pings_time_limit=60 * 5, pings_distance_limit=300,
                  out_of_route_distance_limit=300, adjustment_layer=None):
@@ -293,10 +294,9 @@ class Geo:
         self.__pretty_point(lat, lng)
         self.__point_on_direction()
         between = self.current_direction.notify(self.buffer[0])
-        print(between)
         if self.adjustment_layer:
             self.__make_adjustment(self.buffer[0], *between[self.adjustment_layer])
-        logger.debug('ok')
+        logger.debug('ok direction - {}; vector - {}'.format(self.current_direction.id, self.vector))
         return self.buffer[0]
 
     def __make_adjustment(self, point, prev_point, next_point):
@@ -314,6 +314,7 @@ class Geo:
             self.__going_by_direction()
             if not self.__am_i_going_forward():
                 direction = self.__determine_direction()
+                logger.info('DIRECTION CHANGED')
                 self.current_direction = direction
 
     @staticmethod
@@ -323,7 +324,7 @@ class Geo:
         return point, distance
 
     # defines if point is going forward for given direction
-    def __going_by_direction(self, points=None, direction=None):
+    def __going_by_direction(self, points=None, direction=None, clean_up=True):
         if not points:
             points = self.buffer[1], self.buffer[0]
         prev_point, current_point = points
@@ -331,12 +332,14 @@ class Geo:
             direction = self.current_direction
         if not prev_point.by_direction.get(direction.id):
             prev_point, distance = self.__project_on_direction(prev_point, direction)
+            prev_point.by_direction[direction.id] = 0
         delta = None
         if not current_point.by_direction.get(direction.id):
             current_point, distance = self.__project_on_direction(current_point, direction)
             if distance > self.out_of_route_distance_limit:
-                delta = 0
-                self.clean_buffer.append(current_point)
+                if clean_up:
+                    self.__clean()
+                raise exceptions.OutOfRouteException()
 
         delta = current_point.on_direction_position - prev_point.on_direction_position if delta is None else delta
         if delta > 0:
@@ -345,8 +348,8 @@ class Geo:
             forward_direction = -1  # going backward by direction
         else:
             forward_direction = 0  # not moving
-
-        self.clean_buffer.append(current_point)
+        if forward_direction != 0:
+            self.clean_buffer.append(current_point)
         current_point.by_direction[direction.id] = forward_direction
         return forward_direction
 
@@ -355,32 +358,40 @@ class Geo:
             points = self.clean_buffer
         if not direction:
             direction = self.current_direction
-        forward_direction = sum([p.by_direction[direction.id] for p in points])
+        forward_direction = sum([p.by_direction.get(direction.id, 0) for p in points])
+        self.vector = forward_direction
         if forward_direction > 0:
             return True
         else:
             return False
 
     def __determine_direction(self):
+        out_of_route_count = 0
         for direction in self.directions:
             first_point = self.buffer[self.buffer_limit - 1]
             if not first_point.by_direction.get(direction.id):
                 first_point.by_direction[direction.id] = 0
 
-
             # buffer deque is backward, index = 0 is latest
             for i in range(self.buffer_limit - 2, -1, -1):
-
-                self.__going_by_direction(points=(self.buffer[i+1],
-                                                  self.buffer[i]),
-                                          direction=direction)
+                try:
+                    self.__going_by_direction(points=(self.buffer[i+1],
+                                                      self.buffer[i]),
+                                              direction=direction,
+                                              clean_up=False)
+                except exceptions.OutOfRouteException:
+                    self.buffer[i].by_direction[direction.id] = -1
+                    out_of_route_count += 1
+                    break
 
             if self.__am_i_going_forward(points=self.buffer,
                                          direction=direction):
                 return direction
         self.__clean()
+        if len(self.directions) == out_of_route_count:
+            raise exceptions.OutOfRouteException()
         logger.debug('direction not found')
-        raise exceptions.OutOfRouteException()
+        raise exceptions.DirectionNotFound()
 
     def __pretty_point(self, lat, lng):
         if int(lat) == 0 and int(lng) == 0:
@@ -416,6 +427,7 @@ class Geo:
         self.current_direction = None
         self.buffer.clear()
         self.clean_buffer.clear()
+        self.vector = None
 
 
 

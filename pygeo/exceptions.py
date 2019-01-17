@@ -16,7 +16,6 @@ class OutOfRouteException(BaseException):
     ...
 
 
-
 class ValidationException(BaseException):
     ...
 
