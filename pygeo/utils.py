@@ -1,7 +1,7 @@
 import math
-from logging import getLogger
+import logging
 
-logger = getLogger('pygeo utils')
+logger = logging.getLogger(__name__)
 
 
 EARTH_RADIUS_M = 6371008  # meters
